@@ -7,10 +7,13 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.flow.callbackFlow
@@ -21,6 +24,7 @@ import java.io.Closeable
 import java.io.File
 import java.util.concurrent.TimeUnit
 import kotlin.time.Duration
+import kotlin.time.Duration.Companion.seconds
 
 /**
  * A Recached cache on the device: a local copy of the keys you [watch], kept in
@@ -47,6 +51,9 @@ public class Recached private constructor(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val bus = ChangeBus(::anyKeyMatches)
     private val mutablePending = MutableStateFlow(client.pendingWrites().toLong())
+    private val mutableRefused =
+        MutableSharedFlow<RefusedWrite>(extraBufferCapacity = 64, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+    private val pendingLock = Any()
     private val closeHooks = mutableListOf<AutoCloseable>()
 
     private val transport: Transport? = config.url?.let { url ->
@@ -57,6 +64,7 @@ public class Recached private constructor(
             scope = scope,
             onChanged = bus::publish,
             onUnknownChange = bus::invalidateAll,
+            onRefused = { mutableRefused.tryEmit(it) },
             onAcknowledged = ::refreshPending,
         )
     }
@@ -67,6 +75,18 @@ public class Recached private constructor(
 
     /** Writes not yet acknowledged by the server, including ones from earlier runs. */
     public val pendingWrites: StateFlow<Long> get() = mutablePending
+
+    /**
+     * Writes the server refused for good — a key outside the sync token's
+     * scope or read-only to it, a wrong type — which left the queue without
+     * reaching the server. Collect it for the life of the cache: refusals made
+     * while nothing collects are not kept, beyond a buffer of the last 64.
+     *
+     * A refusal that can clear, such as a sync token the server has not
+     * accepted yet, is not reported: the write stays queued and is retried on
+     * every reconnect, with a growing backoff, until it is accepted.
+     */
+    public val refusedWrites: SharedFlow<RefusedWrite> get() = mutableRefused
 
     init {
         transport?.start()
@@ -108,8 +128,7 @@ public class Recached private constructor(
     /** Set a value that expires after [ttl], rounded up to whole seconds. */
     public fun set(key: String, value: ByteArray, ttl: Duration) {
         require(ttl.isPositive()) { "ttl must be positive" }
-        val seconds = ttl.inWholeMilliseconds.let { (it + 999) / 1000 }.toULong()
-        write(key) { client.setEx(key, value, seconds) }
+        write(key) { client.setEx(key, value, ttl.ceilSeconds().toULong()) }
     }
 
     /** Delete a key. Returns whether it existed locally. */
@@ -221,8 +240,11 @@ public class Recached private constructor(
         client.close()
     }
 
+    /** Read and publish as one step, so a slower caller cannot publish an older count. */
     private fun refreshPending() {
-        mutablePending.value = client.pendingWrites().toLong()
+        synchronized(pendingLock) {
+            mutablePending.value = client.pendingWrites().toLong()
+        }
     }
 
     public companion object {
@@ -263,4 +285,10 @@ public class Recached private constructor(
             OkHttpClient.Builder().pingInterval(20, TimeUnit.SECONDS).build()
         }
     }
+}
+
+/** Whole seconds, rounded up: a positive duration under a second is one second, never zero. */
+internal fun Duration.ceilSeconds(): Long {
+    val whole = inWholeSeconds
+    return if (whole.seconds < this) whole + 1 else whole
 }

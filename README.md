@@ -77,6 +77,17 @@ cache.connectionState   // StateFlow: OFFLINE, CONNECTING, CONNECTED, WAITING
 cache.pendingWrites     // StateFlow<Long>: writes the server has not acknowledged yet
 ```
 
+A write the server refuses for good, such as one to a key the sync token makes
+read-only, leaves the queue without reaching the server. Collect
+`refusedWrites` to hear about it:
+
+```kotlin
+cache.refusedWrites.collect { refused -> log("not saved: ${refused.keys}: ${refused.reason}") }
+```
+
+A refusal that can clear, such as a sync token the server has not accepted yet,
+keeps the write queued; it is retried on every reconnect until it goes through.
+
 Other calls: `incrBy` (a counter that merges with other clients' increments
 instead of overwriting them), `jsonSet` / `jsonMerge` / `getJson`,
 `set(key, value, ttl)`, `delete`, `getMatching`, `setSyncToken`,

@@ -35,7 +35,12 @@ internal class Transport(
     private val onChanged: (List<String>) -> Unit,
     /** A frame changed something that could not be saved, so its keys are unknown. */
     private val onUnknownChange: () -> Unit,
-    /** The pending-write count may have moved. */
+    /** The server refused a queued write for good; called outside [lock]. */
+    private val onRefused: (RefusedWrite) -> Unit,
+    /**
+     * The pending-write count may have moved. Called under [lock], so the core
+     * is still open: it may read the core, and must not wait on anything else.
+     */
     private val onAcknowledged: () -> Unit,
 ) {
     private val lock = Any()
@@ -102,25 +107,30 @@ internal class Transport(
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) = dropped()
 
         private fun receive(webSocket: WebSocket, frame: ByteArray) {
+            // Every call into the core stays under the lock, behind the
+            // isCurrent check: once close() has run, the core may be destroyed.
             val outcome = synchronized(lock) {
                 if (!isCurrent()) return
-                try {
+                val outcome = try {
                     client.frameReceived(frame)
                 } catch (_: dev.recached.ffi.RecachedException) {
                     // Applied in memory but not saved, and its keys are lost
                     // with the error: let every observer re-read.
                     null
                 }
+                onAcknowledged()
+                outcome
             }
             if (outcome == null) {
                 onUnknownChange()
             } else {
                 onChanged(outcome.changedKeys)
-                // Reply matching can no longer be trusted; the reconnect
-                // rebuilds it and the outbox replays.
+                outcome.refused?.let { onRefused(RefusedWrite(it.keys, it.reason)) }
+                // Reply matching can no longer be trusted, or the server
+                // deferred a write: the reconnect rebuilds the one and replays
+                // the other.
                 if (outcome.reconnect) webSocket.cancel()
             }
-            onAcknowledged()
         }
 
         private fun dropped() {
