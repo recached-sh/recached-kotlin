@@ -124,6 +124,24 @@ will stage exactly the published libraries.
 Before a release: `scripts/check-aar.sh` (ABIs, 16 KB alignment) and
 `scripts/check-publication.sh` (a Maven Central dry run of both artifacts).
 
+## Demo
+
+`demo/` is a small Compose checklist on the SDK: items in creation order, tick
+and delete, a connection chip and an unsynced-writes badge.
+
+```sh
+scripts/build-engine.sh ../recached
+(cd engine/host && ./recached-server &)            # ws://127.0.0.1:6380
+./gradlew :demo:installDebug                       # emulator: uses ws://10.0.2.2:6380
+adb reverse tcp:6380 tcp:6380                      # phone: then launch with
+adb shell am start -n dev.recached.demo/.MainActivity --es server ws://127.0.0.1:6380
+```
+
+`scripts/acceptance.py` drives it through its UI on a device or emulator to
+check the four promises above, against a real server, using a relay it can cut
+to take the app offline. CI runs it on an emulator, and it is the check to run
+on a phone before a release.
+
 ## License
 
 Apache-2.0.

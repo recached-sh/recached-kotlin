@@ -20,3 +20,5 @@ rootProject.name = "recached-kotlin"
 // compiler settings apply to hand-written code: generated code cannot meet
 // explicit-API mode, and UniFFI has no option to emit `internal`.
 include(":ffi", ":recached")
+// A small checklist app that shows the SDK's four promises; not published.
+include(":demo")

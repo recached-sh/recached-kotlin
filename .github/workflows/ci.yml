@@ -102,7 +102,9 @@ jobs:
 
       # The JVM suite includes the live tests, which start the staged
       # recached-server themselves on free ports.
-      - name: Unit and live tests (host JVM) and release AARs
+      # assembleRelease includes the demo, minified: R8 with the SDK's
+      # bundled consumer rules.
+      - name: Unit and live tests (host JVM), release AARs and demo
         run: ./gradlew :recached:testDebugUnitTest assembleRelease --console=plain
 
       - name: AAR libraries load on device (ABIs, 16 KB alignment, dependency names)
@@ -181,9 +183,11 @@ jobs:
           disk-size: 2048M
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none -no-metrics
           disable-animations: true
-          script: >-
-            ./gradlew :recached:connectedDebugAndroidTest --console=plain
-            -Pandroid.testInstrumentationRunnerArguments.recachedUrl=ws://10.0.2.2:6380
+          # Then the demo's acceptance run: local reads, durable queued
+          # writes, reconnect recovery and live updates, through its UI.
+          script: |
+            ./gradlew :recached:connectedDebugAndroidTest --console=plain -Pandroid.testInstrumentationRunnerArguments.recachedUrl=ws://10.0.2.2:6380
+            python3 scripts/acceptance.py
 
       - uses: actions/upload-artifact@v4
         if: failure()
