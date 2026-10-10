@@ -7,7 +7,10 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import kotlin.time.Duration.Companion.microseconds
+import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.minutes
+import kotlin.time.Duration.Companion.seconds
 
 /** Everything that works with no server at all. */
 class LocalTest {
@@ -56,6 +59,24 @@ class LocalTest {
             cache.set("session", "token", 2.minutes)
             assertTrue(cache.ttl("session") in 1..120)
         }
+    }
+
+    @Test
+    fun aTtlUnderAMillisecondIsRoundedUpToASecondNotDown() {
+        db.open().use { cache ->
+            cache.set("brief", "v", 500.microseconds)
+            assertEquals("v", cache.getString("brief"))
+            assertTrue(cache.ttl("brief") in 0..1)
+        }
+    }
+
+    @Test
+    fun ttlsRoundUpToWholeSeconds() {
+        assertEquals(1L, 1.microseconds.ceilSeconds())
+        assertEquals(1L, 999.milliseconds.ceilSeconds())
+        assertEquals(1L, 1.seconds.ceilSeconds())
+        assertEquals(2L, 1001.milliseconds.ceilSeconds())
+        assertEquals(120L, 2.minutes.ceilSeconds())
     }
 
     @Test

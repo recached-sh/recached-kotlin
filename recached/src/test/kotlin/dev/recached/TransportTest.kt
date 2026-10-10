@@ -1,10 +1,18 @@
 package dev.recached
 
+import dev.recached.ffi.ClientConfig
+import dev.recached.ffi.RecachedClient
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
+import okhttp3.OkHttpClient
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
@@ -13,6 +21,8 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 
@@ -49,6 +59,12 @@ class TransportTest {
         fun next(): String = checkNotNull(received.poll(5, TimeUnit.SECONDS)) { "the client sent nothing" }
 
         fun awaitOpen() = checkNotNull(opened.poll(5, TimeUnit.SECONDS)) { "the client never connected" }
+
+        /** Read the two frames every session starts with. */
+        fun skipOptIns() {
+            assertTrue(next().contains("DELTA"))
+            assertTrue(next().contains("EXPIRY"))
+        }
     }
 
     private fun accept(autoReply: Boolean = true): Peer =
@@ -72,7 +88,7 @@ class TransportTest {
         val peer = accept()
         db.open(config()).use { cache ->
             peer.awaitOpen()
-            assertTrue(peer.next().contains("DELTA"))
+            peer.skipOptIns()
             val write = peer.next()
             assertTrue(write, write.contains("DEDUP") && write.contains("SET"))
             eventually(message = "the reply to retire the write") { cache.pendingWrites.value == 0L }
@@ -98,13 +114,13 @@ class TransportTest {
         val second = accept()
         db.open(config()).use { cache ->
             first.awaitOpen()
-            first.next() // CLIENT DELTA ON
+            first.skipOptIns()
             cache.set("a", "1")
             assertTrue(first.next().contains("SET"))
             first.socket.close(1001, "going away") // never replied
 
             second.awaitOpen()
-            second.next()
+            second.skipOptIns()
             assertTrue("the unacknowledged write is replayed", second.next().contains("SET"))
             eventually { cache.pendingWrites.value == 0L }
         }
@@ -120,6 +136,91 @@ class TransportTest {
             second.awaitOpen()
             eventually { cache.connectionState.value == ConnectionState.CONNECTED }
         }
+    }
+
+    @Test
+    fun aWriteRefusedForGoodIsReportedAndLeavesTheQueue() {
+        val peer = accept(autoReply = false)
+        db.open(config()).use { cache ->
+            peer.awaitOpen()
+            peer.skipOptIns()
+            repeat(2) { peer.socket.send(OK) }
+            runBlocking {
+                val refused = async(start = CoroutineStart.UNDISPATCHED) {
+                    withTimeout(5_000) { cache.refusedWrites.first() }
+                }
+                cache.set("catalog:1", "x")
+                assertTrue(peer.next().contains("SET"))
+                peer.socket.send("-NOSCOPE key 'catalog:1' is read-only on this connection\r\n")
+                assertEquals(
+                    RefusedWrite(listOf("catalog:1"), "NOSCOPE key 'catalog:1' is read-only on this connection"),
+                    refused.await(),
+                )
+            }
+            eventually(message = "the refused write to leave the queue") { cache.pendingWrites.value == 0L }
+        }
+    }
+
+    @Test
+    fun aWriteDeferredByTheServerIsReplayedOnTheNextConnection() {
+        val first = accept(autoReply = false)
+        val second = accept()
+        db.open(config()).use { cache ->
+            first.awaitOpen()
+            first.skipOptIns()
+            repeat(2) { first.socket.send(OK) }
+            cache.set("a", "1")
+            assertTrue(first.next().contains("SET"))
+            first.socket.send("-NOSCOPE send SYNC TOKEN <token> before issuing commands\r\n")
+
+            second.awaitOpen()
+            second.skipOptIns()
+            assertTrue("the deferred write is replayed", second.next().contains("SET"))
+            eventually { cache.pendingWrites.value == 0L }
+        }
+    }
+
+    @Test
+    fun closingWhileAFrameIsHandledNeverCallsTheClosedCore() {
+        val peer = accept()
+        val client = RecachedClient.open(db.file.path, ClientConfig())
+        val scope = CoroutineScope(SupervisorJob())
+        val inCallback = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val failures = ConcurrentLinkedQueue<Throwable>()
+        val transport = Transport(
+            client = client,
+            url = config().url!!,
+            http = OkHttpClient(),
+            scope = scope,
+            onChanged = { keys ->
+                if ("k" in keys) {
+                    inCallback.countDown()
+                    release.await(5, TimeUnit.SECONDS)
+                }
+            },
+            onUnknownChange = {},
+            onRefused = {},
+            onAcknowledged = {
+                try {
+                    client.pendingWrites()
+                } catch (t: Throwable) {
+                    failures += t
+                }
+            },
+        )
+        transport.start()
+        peer.awaitOpen()
+        peer.socket.send(resp("keychange", "k", "v"))
+        assertTrue("the frame reached its callback", inCallback.await(5, TimeUnit.SECONDS))
+
+        // What Recached.close() does, while that callback is still running.
+        transport.close()
+        client.close()
+        release.countDown()
+        Thread.sleep(300)
+        scope.cancel()
+        assertTrue("the core was called after close: $failures", failures.isEmpty())
     }
 
     @Test
