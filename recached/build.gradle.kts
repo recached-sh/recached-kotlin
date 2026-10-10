@@ -1,3 +1,5 @@
+import com.android.build.api.variant.HasHostTests
+import com.android.build.api.variant.HostTestBuilder
 import com.vanniktech.maven.publish.AndroidSingleVariantLibrary
 import com.vanniktech.maven.publish.JavadocJar
 import com.vanniktech.maven.publish.SourcesJar
@@ -37,6 +39,12 @@ androidComponents {
         // instrumented build runs it too: the same tests on the host and on a
         // device, where the Android libraries, JNA and ART are real.
         variant.androidTest?.sources?.kotlin?.addStaticSourceDirectory("src/test/kotlin")
+        // Except the live tests, which start a recached-server process: JVM
+        // only. On a device they could only skip, and Android's test reports
+        // list a skipped assumption as a failure. AndroidTest covers live sync
+        // on devices instead, against a server passed in by URL.
+        (variant as? HasHostTests)?.hostTests?.get(HostTestBuilder.UNIT_TEST_TYPE)
+            ?.sources?.kotlin?.addStaticSourceDirectory("src/testJvm/kotlin")
     }
 }
 

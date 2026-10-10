@@ -19,9 +19,8 @@ class LiveTest {
     private val phone = TempDb()
     private val tablet = TempDb()
 
-    // In @Before, not a field initializer: LiveServer skips (an assumption
-    // failure) where there is no server binary, and Android's test runner
-    // reports one thrown from the constructor as a failure, not a skip.
+    // In @Before, not a field initializer, so a missing server binary is a
+    // skip: JUnit reports an assumption failed in a constructor as a failure.
     @Before
     fun startServer() {
         server = LiveServer()
