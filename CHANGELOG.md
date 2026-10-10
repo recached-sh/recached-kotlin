@@ -12,5 +12,5 @@
   expires on time.
 - OkHttp WebSocket transport with backoff, reconnecting at once when a network
   becomes available or the app returns to the foreground.
-- Published as `dev.recached:recached-android`, with the native core in
+- Maven coordinates: `dev.recached:recached-android`, with the native core in
   `dev.recached:recached-android-ffi`.

@@ -4,24 +4,33 @@ A local-first [Recached](https://github.com/recached-sh/recached) client for
 Android, in Kotlin.
 
 - **Local reads:** `get` reads device memory. It never waits on the network,
-  and after a restart with no connection it returns the last-synced data.
+  and after a restart with no connection it returns saved data that has not expired.
 - **Durable queued writes:** a write is saved with its place in the outbox
-  before `set` returns. It reaches the server exactly once, even if the app is
-  killed before the server replied.
+  before a successful `set` returns. Pending writes survive an app kill and replay with their original duplicate-suppression identities; see the limits below.
 - **Reconnect recovery:** after a drop the client reconnects with backoff, or
   immediately when the network or the app comes back. It replays queued
   writes and catches up on what changed meanwhile, deletions included.
-- **Reactive updates:** `observe(key)` is a `Flow` that re-emits when that key
-  changes, whether on this device, on another, or on the server. A write to
+- **Reactive updates:** `observe(key)` is a `Flow` of the current local value and later changes, including server updates. Equal values are suppressed and slow consumers can skip intermediate values. A write to
   one key wakes only that key's observers.
 
 Built on `recached-mobile`, the Rust core it shares with the Swift SDK, through
 [UniFFI](https://mozilla.github.io/uniffi-rs/).
 
-> **Status: 0.1.0, unreleased.** Builds against the `feat/recached-mobile`
-> branch of recached until that core ships in a release.
+> **Status: 0.1.0, unreleased preview.** The SDK and native core are implemented. `engine.properties` records CI's core ref but has no pinned release archive. Build from source; this checkout does not provide a Maven Central install path yet.
 
-## Install
+## Build and install the preview
+
+Use JDK 17, the Android SDK and NDK, Rust, and `cargo-ndk`:
+
+```sh
+git clone --branch dev https://github.com/recached-sh/recached.git
+git clone https://github.com/recached-sh/recached-kotlin.git
+cd recached-kotlin
+scripts/build-engine.sh ../recached
+./gradlew publishToMavenLocal
+```
+
+Include `mavenLocal()` in your app's dependency repositories alongside `google()` and `mavenCentral()`, then depend on the locally built artifact:
 
 ```kotlin
 dependencies {
@@ -29,26 +38,28 @@ dependencies {
 }
 ```
 
-minSdk 24. The native core ships for `arm64-v8a`, `armeabi-v7a` and `x86_64`.
-JNA, which the bindings load through, also carries libraries for older ABIs.
-Limit your app to the three above, or a device on another ABI will install it
-and fail on first use:
+minSdk 24. The native core builds for `arm64-v8a`, `armeabi-v7a`, and `x86_64`. JNA also carries libraries for other ABIs; limit your app to the core's three targets to avoid installing on unsupported devices:
 
 ```kotlin
-android { defaultConfig { ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64") } } }
+android {
+    defaultConfig {
+        ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64") }
+    }
+}
 ```
 
-The ProGuard/R8 rules the bindings need are bundled.
-
-Use a `wss://` URL. Android blocks cleartext traffic by default, so a plain
-`ws://` server only works if your network security config allows it, which
-is fine for a development server and wrong for production.
+The bindings' ProGuard/R8 rules are bundled. Use a `wss://` URL for deployed servers. A plain `ws://` development server needs a network security configuration allowing cleartext traffic. The emulator reaches its host at `10.0.2.2`; a USB-connected device can use `adb reverse tcp:6380 tcp:6380`.
 
 ## Use
 
 Open one instance per process and keep it, for example in your `Application`:
 
 ```kotlin
+import android.app.Application
+import dev.recached.Recached
+import dev.recached.RecachedConfig
+import dev.recached.open
+
 class App : Application() {
     val cache by lazy {
         Recached.open(this, RecachedConfig(url = "wss://cache.example.com", syncToken = token))
@@ -61,14 +72,18 @@ Choose what to keep in sync, then read, write and observe:
 ```kotlin
 cache.watch("todo:*")                      // server state for these keys, kept live
 
-cache.set("todo:42", """{"title":"Buy milk"}""")
-val todo: String? = cache.getString("todo:42")     // local: safe on the main thread
+cache.set("todo:42:title", "Buy milk")
+val todo: String? = cache.getString("todo:42:title")     // local: safe on the main thread
 
 class TodosViewModel(cache: Recached) : ViewModel() {
     val todos: StateFlow<List<Entry>> = cache.observeMatching("todo:*")
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 }
 ```
+
+`watch` requests a server snapshot asynchronously. Until it arrives, reads can return a miss or saved data. Watches are not persisted; register them after every open. Observers listen to local changes and do not create server subscriptions.
+
+The examples assume your app supplies a backend-minted `token` and a `render` function. A watch is not an authorization boundary: configure [sync scopes](https://recached.dev/server/sync-scopes) for per-user state.
 
 Show sync state in the UI:
 
@@ -91,12 +106,25 @@ keeps the write queued; it is retried on every reconnect until it goes through.
 Other calls: `incrBy` (a counter that merges with other clients' increments
 instead of overwriting them), `jsonSet` / `jsonMerge` / `getJson`,
 `set(key, value, ttl)`, `delete`, `getMatching`, `setSyncToken`,
-`reconnectNow`. `close()` stops syncing. Queued writes stay on disk for the
-next open.
+`reconnectNow`. `close()` stops syncing and releases the native client; queued writes stay on disk for the next open. Open a new instance before using the cache again.
 
 The database lives in the app's **no-backup** directory. Auto Backup must not
 restore it onto another device: the two would share a client identity, and
 the server would drop one device's writes as duplicates of the other's.
+
+## Delivery and storage limits
+
+A connected state means the WebSocket is open, not that authentication, watch hydration, or pending writes have completed. Local write results describe the local operation; the server can later refuse it.
+
+- The outbox defaults to 10,000 writes. `maxPendingWrites` changes the cap; overflow drops the oldest queued write while keeping its local effect. The native API has no overflow event.
+- Server duplicate suppression covers retries while the client's mark is retained. AOF recovery after the latest checkpoint can replay a write without its dedup mark; idle marks can also be swept after 24 hours when the map exceeds 10,000 clients. This is not an unconditional exactly-once guarantee.
+- A permanent refusal emits a live event and removes the write from the queue. A permitted watched snapshot restores the server value; an unwatched key can keep the refused local value. Refusal events are not saved for replay.
+- A storage error can leave a write applied in memory and eligible to sync without saving it. Handle errors instead of assuming rollback.
+- SQLite uses WAL with `synchronous = NORMAL`. Committed data survives an app kill; an OS crash or power loss can lose recent commits.
+
+Binary reads return `ByteArray`; `getString` fails on invalid UTF-8, while text observers return `null`. TTL reads use seconds (`-1` without expiry, `-2` when absent), and positive TTL writes round up to whole seconds. Reads mask expired values; offline expiry alone does not notify observers because there is no local expiry timer. The native wrappers expose strings, bytes, counters, and JSON operations; they do not expose individual collection commands or pub/sub.
+
+Omitting the config URL keeps the cache local; writes still enter the outbox for a later open with a server URL. See [client support and limits](https://recached.dev/guide/client-support) for the shared protocol and adapter differences.
 
 ## How it fits together
 
