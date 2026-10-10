@@ -78,6 +78,13 @@ class Relay:
 
     def stop(self):
         if self.listener:
+            # shutdown() before close(): on Linux, closing a listening socket
+            # does not wake a thread blocked in accept() on it, which then
+            # keeps accepting — the app would reconnect straight through.
+            try:
+                self.listener.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
             self.listener.close()
             self.listener = None
         for c in self.conns:
