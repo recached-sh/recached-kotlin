@@ -1,0 +1,195 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  NDK_VERSION: "30.0.16248370"
+
+jobs:
+  # Stage the engine once and hand it to the other jobs, so the emulator job
+  # tests the same libraries the build job checked.
+  engine:
+    name: Stage engine
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read engine.properties
+        id: engine
+        run: |
+          for key in ref version sha256; do
+            echo "$key=$(sed -n "s/^$key=//p" engine.properties)" >> "$GITHUB_OUTPUT"
+          done
+
+      - uses: actions/checkout@v4
+        with:
+          repository: recached-sh/recached
+          ref: ${{ steps.engine.outputs.ref }}
+          path: engine-src
+
+      # rust-toolchain.toml in the core pins the version; rustup honours it.
+      - name: Rust toolchain and Android targets
+        working-directory: engine-src
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engine-src
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: "ndk;${{ env.NDK_VERSION }}"
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+
+      # A pinned release ships its own Android libraries and bindings; the host
+      # library and server the tests use are always built from source, since
+      # releases carry neither.
+      - name: Build or fetch engine
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/${{ env.NDK_VERSION }}
+        run: |
+          if [ -n "${{ steps.engine.outputs.sha256 }}" ]; then
+            HOST_ONLY=1 scripts/build-engine.sh engine-src
+            scripts/fetch-engine.sh
+          else
+            scripts/build-engine.sh engine-src
+          fi
+          cat engine/SOURCE
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: engine
+          path: engine/
+
+  build:
+    name: Unit and live tests, lint, AARs
+    needs: engine
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: engine
+          path: engine
+
+      # upload-artifact does not keep file modes.
+      - run: chmod +x engine/host/recached-server
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: "ndk;${{ env.NDK_VERSION }}"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # The JVM suite includes the live tests, which start the staged
+      # recached-server themselves on free ports.
+      - name: Unit and live tests (host JVM) and release AARs
+        run: ./gradlew :recached:testDebugUnitTest assembleRelease --console=plain
+
+      - name: AAR libraries load on device (ABIs, 16 KB alignment, dependency names)
+        run: scripts/check-aar.sh
+
+      # Warnings fail the build (recached/build.gradle.kts, android.lint).
+      - name: Android lint
+        run: ./gradlew :recached:lintRelease --console=plain
+
+      # Both artifacts, built and checked the way the publish workflow builds
+      # them, minus signing.
+      - name: Publication dry run
+        run: scripts/check-publication.sh
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-reports
+          path: |
+            recached/build/reports/tests/
+            recached/build/reports/lint-results-release.html
+
+  android:
+    name: Instrumented tests (emulator)
+    needs: engine
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: engine
+          path: engine
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: "ndk;${{ env.NDK_VERSION }}"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # The runner image ships ~20 GB of toolchains this job never uses, and
+      # without removing some the emulator cannot create its userdata
+      # partition.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/share/boost \
+            /opt/hostedtoolcache/CodeQL /usr/local/lib/node_modules
+          df -h /
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      # A real server on the runner, which the emulator reaches as 10.0.2.2.
+      - name: Start recached-server
+        run: |
+          chmod +x engine/host/recached-server
+          mkdir -p "$RUNNER_TEMP/server"
+          cd "$RUNNER_TEMP/server"
+          # Every interface (the default), so the emulator can reach it.
+          RECACHED_SAVE_INTERVAL=0 RECACHED_METRICS_PORT=0 \
+            "$GITHUB_WORKSPACE/engine/host/recached-server" > server.log 2>&1 &
+
+      - uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          target: google_apis
+          cores: 4
+          disk-size: 2048M
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none -no-metrics
+          disable-animations: true
+          script: >-
+            ./gradlew :recached:connectedDebugAndroidTest --console=plain
+            -Pandroid.testInstrumentationRunnerArguments.recachedUrl=ws://10.0.2.2:6380
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: android-test-reports
+          path: |
+            recached/build/reports/androidTests/
+            recached/build/outputs/androidTest-results/
+            ${{ runner.temp }}/server/server.log
