@@ -4,6 +4,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.junit.After
+import org.junit.Before
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -14,15 +15,23 @@ import org.junit.Test
  * release promises, as an app on two devices would see them.
  */
 class LiveTest {
-    private val server = LiveServer()
+    private lateinit var server: LiveServer
     private val phone = TempDb()
     private val tablet = TempDb()
+
+    // In @Before, not a field initializer: LiveServer skips (an assumption
+    // failure) where there is no server binary, and Android's test runner
+    // reports one thrown from the constructor as a failure, not a skip.
+    @Before
+    fun startServer() {
+        server = LiveServer()
+    }
 
     @After
     fun cleanup() {
         phone.close()
         tablet.close()
-        server.close()
+        if (::server.isInitialized) server.close()
     }
 
     private fun TempDb.connect() = open(RecachedConfig(url = server.url))

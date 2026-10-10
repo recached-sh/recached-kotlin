@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- The tests talk to MockWebServer on localhost and to a plain ws://
+         server on the host machine. Android blocks cleartext traffic by
+         default, which OkHttp enforces before a socket is even opened. -->
+    <application android:usesCleartextTraffic="true" />
+</manifest>

@@ -40,6 +40,10 @@ android { defaultConfig { ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a",
 
 The ProGuard/R8 rules the bindings need are bundled.
 
+Use a `wss://` URL. Android blocks cleartext traffic by default, so a plain
+`ws://` server only works if your network security config allows it, which
+is fine for a development server and wrong for production.
+
 ## Use
 
 Open one instance per process and keep it, for example in your `Application`:
