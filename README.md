@@ -161,7 +161,9 @@ release carries the mobile archive, pin it there, and `scripts/fetch-engine.sh`
 will stage exactly the published libraries.
 
 Before a release: `scripts/check-aar.sh` (ABIs, 16 KB alignment) and
-`scripts/check-publication.sh` (a Maven Central dry run of both artifacts).
+`scripts/check-publication.sh` (a Maven Central dry run of both artifacts). CI
+runs both. [RELEASING.md](RELEASING.md) covers the Maven Central setup and the
+tag that publishes.
 
 ## Demo
 
