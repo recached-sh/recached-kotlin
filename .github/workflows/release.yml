@@ -1,0 +1,162 @@
+name: Release
+
+# A `v*` tag publishes dev.recached:recached-android and
+# dev.recached:recached-android-ffi to Maven Central, then a GitHub Release.
+#
+# Nothing uploads until the tag checks and the full CI suite have passed: a
+# version on Maven Central can never be replaced or deleted, only superseded.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+# Two tags pushed close together must not publish over each other.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  NDK_VERSION: "30.0.16248370"
+
+jobs:
+  # ── Gates ────────────────────────────────────────────────────────────────
+
+  tag-checks:
+    name: Verify tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # The artifacts are versioned by gradle.properties, not by the tag, so a
+      # tag that disagrees would publish a version the tag never named.
+      - name: Tag matches VERSION_NAME
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          VERSION_NAME="$(sed -n 's/^VERSION_NAME=//p' gradle.properties)"
+          echo "tag=$TAG_VERSION VERSION_NAME=$VERSION_NAME"
+          if [ "$TAG_VERSION" != "$VERSION_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match VERSION_NAME=$VERSION_NAME in gradle.properties"
+            exit 1
+          fi
+
+      - name: Tagged commit is on main
+        run: |
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$GITHUB_REF_NAME points at a commit that is not on main"
+            exit 1
+          fi
+
+      # Case-insensitive: "(unreleased)" and "(Unreleased)" both mean not yet.
+      - name: CHANGELOG has a released entry for this version
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          if ! grep -qE "^## \[?${TAG_VERSION}\]?" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## [$TAG_VERSION]' section"
+            exit 1
+          fi
+          if grep -qiE "^## \[?${TAG_VERSION}\]?.*unreleased" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md still marks $TAG_VERSION as unreleased"
+            exit 1
+          fi
+
+      # Published AARs must carry exactly the native libraries a recached
+      # release published (scripts/fetch-engine.sh), never a build of a branch.
+      - name: engine.properties pins a recached release
+        run: |
+          prop() { sed -n "s/^$1=//p" engine.properties; }
+          for key in version url sha256; do
+            if [ -z "$(prop "$key")" ]; then
+              echo "::error::engine.properties has no $key: pin the recached release whose recached-mobile-android archive this version ships"
+              exit 1
+            fi
+          done
+          REF="$(prop ref)"
+          if [ "$REF" != "v$(prop version)" ]; then
+            echo "::error::engine.properties ref=$REF should be the pinned release's tag, v$(prop version), so the tests run against the same core"
+            exit 1
+          fi
+
+  # The whole CI suite, unit, live and emulator tests included. With a release
+  # pinned, its engine job stages that release's libraries, so what is tested
+  # is what ships.
+  ci:
+    name: CI
+    needs: tag-checks
+    uses: ./.github/workflows/ci.yml
+
+  # ── Publish ──────────────────────────────────────────────────────────────
+
+  maven-central:
+    name: Publish to Maven Central
+    needs: [tag-checks, ci]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The engine CI staged and tested, from this same run.
+      - uses: actions/download-artifact@v4
+        with:
+          name: engine
+          path: engine
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: "ndk;${{ env.NDK_VERSION }}"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # Uploads both artifacts as one Central Portal deployment and releases
+      # it once validation passes. Configuration cache off, as in
+      # scripts/check-publication.sh: publishing tasks do not support it.
+      - name: Sign, upload and release
+        env:
+          ORG_GRADLE_PROJECT_mavenCentralUsername: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          ORG_GRADLE_PROJECT_mavenCentralPassword: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNING_KEY }}
+          ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_KEY_PASSWORD }}
+        # Without SIGNING_KEY the build would upload unsigned artifacts, which
+        # the portal rejects only after the upload; fail here instead. The key
+        # password is optional, for a key that has none.
+        run: |
+          [ -n "$ORG_GRADLE_PROJECT_mavenCentralUsername" ] || { echo "::error::Secret MAVEN_CENTRAL_USERNAME is not set"; exit 1; }
+          [ -n "$ORG_GRADLE_PROJECT_mavenCentralPassword" ] || { echo "::error::Secret MAVEN_CENTRAL_PASSWORD is not set"; exit 1; }
+          [ -n "$ORG_GRADLE_PROJECT_signingInMemoryKey" ] || { echo "::error::Secret SIGNING_KEY is not set"; exit 1; }
+          ./gradlew publishAndReleaseToMavenCentral --no-configuration-cache --console=plain
+
+  github-release:
+    name: GitHub Release
+    needs: maven-central
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create the release from the CHANGELOG entry
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          # The section's body: everything after its heading, up to the next one.
+          awk -v v="$TAG_VERSION" '
+            /^## / { if (found) exit; if (index($0, "[" v "]") || index($0, "## " v)) { found = 1; next } }
+            found
+          ' CHANGELOG.md > notes.md
+          {
+            echo
+            echo "\`\`\`kotlin"
+            echo "implementation(\"dev.recached:recached-android:$TAG_VERSION\")"
+            echo "\`\`\`"
+          } >> notes.md
+          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --notes-file notes.md --verify-tag
