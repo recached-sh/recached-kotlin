@@ -16,27 +16,19 @@ Android, in Kotlin.
 Built on `recached-mobile`, the Rust core it shares with the Swift SDK, through
 [UniFFI](https://mozilla.github.io/uniffi-rs/).
 
-> **Status: 0.1.0, unreleased preview.** The SDK and native core are implemented. `engine.properties` records CI's core ref but has no pinned release archive. Build from source; this checkout does not provide a Maven Central install path yet.
+> **Status: 0.1.0, preview.** Built on the native core of recached v0.4.0. The API may still change before 1.0.
 
-## Build and install the preview
+## Install
 
-Use JDK 17, the Android SDK and NDK, Rust, and `cargo-ndk`:
-
-```sh
-git clone --branch dev https://github.com/recached-sh/recached.git
-git clone https://github.com/recached-sh/recached-kotlin.git
-cd recached-kotlin
-scripts/build-engine.sh ../recached
-./gradlew publishToMavenLocal
-```
-
-Include `mavenLocal()` in your app's dependency repositories alongside `google()` and `mavenCentral()`, then depend on the locally built artifact:
+From Maven Central:
 
 ```kotlin
 dependencies {
     implementation("dev.recached:recached-android:0.1.0")
 }
 ```
+
+`recached-android-ffi`, the native core, comes with it.
 
 minSdk 24. The native core builds for `arm64-v8a`, `armeabi-v7a`, and `x86_64`. JNA also carries libraries for other ABIs; limit your app to the core's three targets to avoid installing on unsupported devices:
 
@@ -162,8 +154,8 @@ will stage exactly the published libraries.
 
 Before a release: `scripts/check-aar.sh` (ABIs, 16 KB alignment) and
 `scripts/check-publication.sh` (a Maven Central dry run of both artifacts). CI
-runs both. [RELEASING.md](RELEASING.md) covers the Maven Central setup and the
-tag that publishes.
+runs both. A `v*` tag publishes to Maven Central through
+`.github/workflows/release.yml`, once its checks and the full CI suite pass.
 
 ## Demo
 
