@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.1.0] (unreleased)
+## [0.1.0] (2026-10-11)
 
 - First release: `Recached.open` (file or Android `Context`), local reads,
   durable queued writes, `watch`, `Flow` observers per key and per pattern,
