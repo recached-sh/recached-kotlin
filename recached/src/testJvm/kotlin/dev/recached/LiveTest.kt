@@ -114,4 +114,51 @@ class LiveTest {
             assertEquals("""{"name":"Ana"}""", offline.getJson("profile"))
         }
     }
+
+    @Test
+    fun theStatusIsReadyOnlyAfterReplayAndHydration() {
+        phone.open().use { offline -> offline.set("queued:1", "v") }
+        phone.connect().use { a ->
+            a.watch("queued:*")
+            val phases = mutableListOf<SyncPhase>()
+            runBlocking {
+                withTimeout(5_000) {
+                    a.syncStatus.first {
+                        phases += it.phase
+                        it.phase == SyncPhase.READY
+                    }
+                }
+            }
+            assertEquals(0L, a.pendingWrites.value)
+            assertTrue(
+                "the queued write was replayed before READY: $phases",
+                phases.indexOf(SyncPhase.REPLAYING) in 0 until phases.indexOf(SyncPhase.READY),
+            )
+            assertTrue("lastSyncedAt is set at READY", a.syncStatus.value.lastSyncedAtMillis != null)
+            // watch() may run before or after the socket opens; either way
+            // the pattern ends current.
+            eventually(message = "the pattern's snapshot") {
+                a.subscriptionStates.value["queued:*"] == SubscriptionState.Current
+            }
+            assertEquals("v", a.getString("queued:1"))
+        }
+    }
+
+    @Test
+    fun aPatternWatchedLaterHydratesWhileTheConnectionStaysReady() {
+        tablet.connect().use { b ->
+            b.set("late:1", "x")
+            eventually { b.pendingWrites.value == 0L }
+        }
+        phone.connect().use { a ->
+            a.watch("early:*")
+            eventually(message = "ready") { a.syncStatus.value.phase == SyncPhase.READY }
+            a.watch("late:*")
+            eventually(message = "the late pattern's snapshot") {
+                a.subscriptionStates.value["late:*"] == SubscriptionState.Current
+            }
+            assertEquals(SyncPhase.READY, a.syncStatus.value.phase)
+            assertEquals("x", a.getString("late:1"))
+        }
+    }
 }

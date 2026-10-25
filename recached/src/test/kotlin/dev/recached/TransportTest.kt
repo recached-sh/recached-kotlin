@@ -60,10 +60,12 @@ class TransportTest {
 
         fun awaitOpen() = checkNotNull(opened.poll(5, TimeUnit.SECONDS)) { "the client never connected" }
 
-        /** Read the two frames every session starts with. */
+        /** Read the four protocol opt-ins every session starts with. */
         fun skipOptIns() {
             assertTrue(next().contains("DELTA"))
             assertTrue(next().contains("EXPIRY"))
+            assertTrue(next().contains("PUSHFRAMES"))
+            assertTrue(next().contains("DEDUPBARRIER"))
         }
     }
 
@@ -101,7 +103,7 @@ class TransportTest {
         val peer = accept()
         db.open(config()).use { cache ->
             peer.awaitOpen()
-            peer.socket.send(resp("keychange", "greeting", "hello"))
+            peer.socket.send(push("keychange", "greeting", "hello"))
             runBlocking {
                 withTimeout(5_000) { cache.observeString("greeting").first { it == "hello" } }
             }
@@ -144,7 +146,7 @@ class TransportTest {
         db.open(config()).use { cache ->
             peer.awaitOpen()
             peer.skipOptIns()
-            repeat(2) { peer.socket.send(OK) }
+            repeat(OPT_INS) { peer.socket.send(OK) }
             runBlocking {
                 val refused = async(start = CoroutineStart.UNDISPATCHED) {
                     withTimeout(5_000) { cache.refusedWrites.first() }
@@ -153,7 +155,11 @@ class TransportTest {
                 assertTrue(peer.next().contains("SET"))
                 peer.socket.send("-NOSCOPE key 'catalog:1' is read-only on this connection\r\n")
                 assertEquals(
-                    RefusedWrite(listOf("catalog:1"), "NOSCOPE key 'catalog:1' is read-only on this connection"),
+                    RefusedWrite(
+                        listOf("catalog:1"),
+                        "NOSCOPE key 'catalog:1' is read-only on this connection",
+                        unreconciled = listOf("catalog:1"),
+                    ),
                     refused.await(),
                 )
             }
@@ -168,7 +174,7 @@ class TransportTest {
         db.open(config()).use { cache ->
             first.awaitOpen()
             first.skipOptIns()
-            repeat(2) { first.socket.send(OK) }
+            repeat(OPT_INS) { first.socket.send(OK) }
             cache.set("a", "1")
             assertTrue(first.next().contains("SET"))
             first.socket.send("-NOSCOPE send SYNC TOKEN <token> before issuing commands\r\n")
@@ -208,10 +214,17 @@ class TransportTest {
                     failures += t
                 }
             },
+            onSyncChanged = {
+                try {
+                    client.syncStatus()
+                } catch (t: Throwable) {
+                    failures += t
+                }
+            },
         )
         transport.start()
         peer.awaitOpen()
-        peer.socket.send(resp("keychange", "k", "v"))
+        peer.socket.send(push("keychange", "k", "v"))
         assertTrue("the frame reached its callback", inCallback.await(5, TimeUnit.SECONDS))
 
         // What Recached.close() does, while that callback is still running.
@@ -235,3 +248,13 @@ class TransportTest {
         assertEquals(before, server.requestCount)
     }
 }
+
+/** Session opt-ins every open sends before anything else. */
+private const val OPT_INS = 4
+
+/**
+ * A server frame as a RESP3 push: these scripted peers answer
+ * `CLIENT PUSHFRAMES ON` with `+OK`, as a 0.5 server does, so their
+ * keychanges must be pushes too — a plain array would be a reply.
+ */
+private fun push(vararg parts: String): String = ">" + resp(*parts).drop(1)

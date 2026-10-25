@@ -10,5 +10,12 @@ package dev.recached
  * @property keys the keys the write would have changed.
  * @property reason the server's error, such as
  *   `NOSCOPE key 'k' is read-only on this connection`.
+ * @property unreconciled those of [keys] no watched pattern covers: their
+ *   local value is the refused one and nothing will correct it, so show the
+ *   write as failed and rewrite or re-read them.
  */
-public data class RefusedWrite(public val keys: List<String>, public val reason: String)
+public data class RefusedWrite(
+    public val keys: List<String>,
+    public val reason: String,
+    public val unreconciled: List<String> = emptyList(),
+)

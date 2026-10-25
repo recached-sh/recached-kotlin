@@ -42,6 +42,11 @@ internal class Transport(
      * is still open: it may read the core, and must not wait on anything else.
      */
     private val onAcknowledged: () -> Unit,
+    /**
+     * The synchronization status may have moved. Called under [lock] after
+     * every transport event, with the same constraints as [onAcknowledged].
+     */
+    private val onSyncChanged: () -> Unit,
 ) {
     private val lock = Any()
     private var socket: WebSocket? = null
@@ -68,6 +73,7 @@ internal class Transport(
             socket = null
             client.connectionClosed()
             mutableState.value = ConnectionState.OFFLINE
+            onSyncChanged()
         }
     }
 
@@ -78,6 +84,8 @@ internal class Transport(
             retry = null
             val current = ++generation
             mutableState.value = ConnectionState.CONNECTING
+            client.connectionOpening()
+            onSyncChanged()
             // Asynchronous: the listener's callbacks arrive on OkHttp's thread
             // and wait for this lock.
             socket = http.newWebSocket(Request.Builder().url(url).build(), Listener(current))
@@ -91,6 +99,7 @@ internal class Transport(
                 // Sends the session and every queued write through the sink.
                 client.connectionOpened(Sink(webSocket))
                 mutableState.value = ConnectionState.CONNECTED
+                onSyncChanged()
             }
         }
 
@@ -119,13 +128,14 @@ internal class Transport(
                     null
                 }
                 onAcknowledged()
+                onSyncChanged()
                 outcome
             }
             if (outcome == null) {
                 onUnknownChange()
             } else {
                 onChanged(outcome.changedKeys)
-                outcome.refused?.let { onRefused(RefusedWrite(it.keys, it.reason)) }
+                outcome.refused?.let { onRefused(RefusedWrite(it.keys, it.reason, it.unreconciled)) }
                 // Reply matching can no longer be trusted, or the server
                 // deferred a write: the reconnect rebuilds the one and replays
                 // the other.
@@ -138,6 +148,7 @@ internal class Transport(
                 if (!isCurrent()) return
                 socket = null
                 val wait = client.connectionClosed().toLong()
+                onSyncChanged()
                 if (closed) return
                 mutableState.value = ConnectionState.WAITING
                 retry = scope.launch {
