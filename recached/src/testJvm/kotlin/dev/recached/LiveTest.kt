@@ -120,20 +120,18 @@ class LiveTest {
         phone.open().use { offline -> offline.set("queued:1", "v") }
         phone.connect().use { a ->
             a.watch("queued:*")
-            val phases = mutableListOf<SyncPhase>()
-            runBlocking {
+            // READY is reached only after the replay: by then the queued
+            // write has been acknowledged. (Which intermediate phases a
+            // collector sees is not asserted: a StateFlow is conflated, and the
+            // socket may open before collection starts. The core's tests pin
+            // the phase order itself.)
+            val pendingAtReady = runBlocking {
                 withTimeout(5_000) {
-                    a.syncStatus.first {
-                        phases += it.phase
-                        it.phase == SyncPhase.READY
-                    }
+                    a.syncStatus.first { it.phase == SyncPhase.READY }
+                    a.pendingWrites.value
                 }
             }
-            assertEquals(0L, a.pendingWrites.value)
-            assertTrue(
-                "the queued write was replayed before READY: $phases",
-                phases.indexOf(SyncPhase.REPLAYING) in 0 until phases.indexOf(SyncPhase.READY),
-            )
+            assertEquals(0L, pendingAtReady)
             assertTrue("lastSyncedAt is set at READY", a.syncStatus.value.lastSyncedAtMillis != null)
             // watch() may run before or after the socket opens; either way
             // the pattern ends current.
