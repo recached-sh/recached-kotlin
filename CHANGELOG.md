@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.1.1] (2026-10-25)
+
+Built on the native core of recached v0.5.0.
+
+- `syncStatus`: the synchronization lifecycle — `READY` only once the session
+  is authenticated, queued writes are replayed and answered, and the patterns
+  watched at connect time are hydrated — with the current problem and
+  `lastSyncedAtMillis`. `subscriptionStates` reports each watched pattern.
+- A write past `maxPendingWrites` throws `RecachedException.OutboxFull` and
+  changes nothing; until now the oldest queued write was dropped. Set
+  `RecachedConfig(evictOldestWhenFull = true)` for the old behaviour.
+- A write that throws `RecachedException.Storage` now changes nothing: the
+  core rolls it back instead of keeping it in memory.
+- `RefusedWrite.unreconciled` names the refused keys no watched pattern covers.
+
 ## [0.1.0] (2026-10-11)
 
 - First release: `Recached.open` (file or Android `Context`), local reads,

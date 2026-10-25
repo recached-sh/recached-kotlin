@@ -16,7 +16,7 @@ Android, in Kotlin.
 Built on `recached-mobile`, the Rust core it shares with the Swift SDK, through
 [UniFFI](https://mozilla.github.io/uniffi-rs/).
 
-> **Status: 0.1.0, preview.** Built on the native core of recached v0.4.0. The API may still change before 1.0.
+> **Status: 0.1.1, preview.** Built on the native core of recached v0.5.0. The API may still change before 1.0.
 
 ## Install
 
@@ -24,7 +24,7 @@ From Maven Central:
 
 ```kotlin
 dependencies {
-    implementation("dev.recached:recached-android:0.1.0")
+    implementation("dev.recached:recached-android:0.1.1")
 }
 ```
 
@@ -80,16 +80,33 @@ The examples assume your app supplies a backend-minted `token` and a `render` fu
 Show sync state in the UI:
 
 ```kotlin
-cache.connectionState   // StateFlow: OFFLINE, CONNECTING, CONNECTED, WAITING
-cache.pendingWrites     // StateFlow<Long>: writes the server has not acknowledged yet
+cache.syncStatus          // StateFlow<SyncStatus>: DISCONNECTED, CONNECTING, AUTHENTICATING,
+                          // REPLAYING, HYDRATING, READY, DEGRADED — plus the problem, if any,
+                          // and lastSyncedAtMillis
+cache.subscriptionStates  // StateFlow<Map<String, SubscriptionState>>: each watched pattern
+cache.pendingWrites       // StateFlow<Long>: writes the server has not acknowledged yet
+cache.connectionState     // StateFlow: the socket alone — OFFLINE, CONNECTING, CONNECTED, WAITING
 ```
+
+`READY` means synchronized: the session is authenticated, every queued write has
+been replayed and answered, and every pattern watched when the socket opened has
+its snapshot. A pattern watched later hydrates on its own, without taking the
+cache out of `READY`.
+
+A write past `maxPendingWrites` (10,000 by default) throws
+`RecachedException.OutboxFull` and changes nothing; a write that throws
+`RecachedException.Storage` changed nothing either.
 
 A write the server refuses for good, such as one to a key the sync token makes
 read-only, leaves the queue without reaching the server. Collect
 `refusedWrites` to hear about it:
 
 ```kotlin
-cache.refusedWrites.collect { refused -> log("not saved: ${refused.keys}: ${refused.reason}") }
+cache.refusedWrites.collect { refused ->
+    log("not saved: ${refused.keys}: ${refused.reason}")
+    // No watched pattern covers these, so nothing will correct them locally.
+    refused.unreconciled.forEach(::rereadOrMarkFailed)
+}
 ```
 
 A refusal that can clear, such as a sync token the server has not accepted yet,
@@ -106,7 +123,7 @@ the server would drop one device's writes as duplicates of the other's.
 
 ## Delivery and storage limits
 
-A connected state means the WebSocket is open, not that authentication, watch hydration, or pending writes have completed. Local write results describe the local operation; the server can later refuse it.
+A connected state means the WebSocket is open, not that authentication, watch hydration, or pending writes have completed — `syncStatus` reports those. Local write results describe the local operation; the server can later refuse it.
 
 - The outbox defaults to 10,000 writes. `maxPendingWrites` changes the cap; overflow drops the oldest queued write while keeping its local effect. The native API has no overflow event.
 - Server duplicate suppression covers retries while the client's mark is retained. AOF recovery after the latest checkpoint can replay a write without its dedup mark; idle marks can also be swept after 24 hours when the map exceeds 10,000 clients. This is not an unconditional exactly-once guarantee.

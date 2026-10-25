@@ -135,4 +135,30 @@ class LocalTest {
         val text = RecachedConfig(url = "wss://x", password = "hunter2", syncToken = "tok").toString()
         assertFalse(text, "hunter2" in text || "tok)" in text)
     }
+
+    @Test
+    fun aFullOutboxRefusesTheWriteAndChangesNothing() {
+        db.open(RecachedConfig(maxPendingWrites = 2)).use { cache ->
+            cache.set("a", "1")
+            cache.set("b", "1")
+            val refused = runCatching { cache.set("a", "changed") }.exceptionOrNull()
+            assertTrue("expected OutboxFull, got $refused", refused is RecachedException.OutboxFull)
+            refused as RecachedException.OutboxFull
+            assertEquals(2L, refused.pending)
+            assertEquals(2L, refused.capacity)
+            assertEquals("1", cache.getString("a"))
+            assertEquals(2L, cache.pendingWrites.value)
+        }
+        db.open(RecachedConfig(maxPendingWrites = 2)).use { reopened ->
+            assertEquals("the queued writes are intact on disk", 2L, reopened.pendingWrites.value)
+        }
+    }
+
+    @Test
+    fun withoutAUrlTheStatusStaysDisconnected() {
+        db.open().use { cache ->
+            assertEquals(SyncPhase.DISCONNECTED, cache.syncStatus.value.phase)
+            assertNull(cache.syncStatus.value.lastSyncedAtMillis)
+        }
+    }
 }

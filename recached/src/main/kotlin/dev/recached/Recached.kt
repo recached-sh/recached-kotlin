@@ -34,8 +34,9 @@ import kotlin.time.Duration.Companion.seconds
  *   They never wait on the network, so they are safe on the main thread.
  * - **Writes** ([set], [delete], [incrBy], …) apply locally, are saved together
  *   with their place in the outbox before the call returns, and go to the
- *   server now or after the next reconnect. Each reaches the server exactly
- *   once, even if the app is killed in between.
+ *   server now or after the next reconnect. A write that throws left nothing
+ *   behind. A retried write is not applied twice while the server keeps its
+ *   duplicate-suppression record (see the core's documented guarantees).
  * - **Observers** ([observe], [observeMatching]) emit the current value and
  *   then every change, from this device or any other. A write to one key
  *   wakes only that key's observers.
@@ -56,6 +57,12 @@ public class Recached private constructor(
     private val pendingLock = Any()
     private val closeHooks = mutableListOf<AutoCloseable>()
 
+    /** Orders status reads and their publication, so an older status never overwrites a newer one. */
+    private val syncLock = Any()
+    private var lastSyncedAtMillis: Long? = null
+    private val mutableSyncStatus = MutableStateFlow(client.syncStatus().toPublic(null))
+    private val mutableSubscriptions = MutableStateFlow<Map<String, SubscriptionState>>(emptyMap())
+
     private val transport: Transport? = config.url?.let { url ->
         Transport(
             client = client,
@@ -66,10 +73,24 @@ public class Recached private constructor(
             onUnknownChange = bus::invalidateAll,
             onRefused = { mutableRefused.tryEmit(it) },
             onAcknowledged = ::refreshPending,
+            onSyncChanged = ::refreshSync,
         )
     }
 
-    /** Where the connection stands. Always [ConnectionState.OFFLINE] without a URL. */
+    /**
+     * Where synchronization stands, pushed on every change. [SyncPhase.READY]
+     * needs more than an open socket — see [SyncPhase]. Prefer this to
+     * [connectionState] for "synced" indicators.
+     */
+    public val syncStatus: StateFlow<SyncStatus> get() = mutableSyncStatus
+
+    /** Each watched pattern's progress: a pattern watched later can hydrate while the rest are current. */
+    public val subscriptionStates: StateFlow<Map<String, SubscriptionState>> get() = mutableSubscriptions
+
+    /**
+     * Where the socket stands. Always [ConnectionState.OFFLINE] without a URL.
+     * [ConnectionState.CONNECTED] means open, not synchronized: see [syncStatus].
+     */
     public val connectionState: StateFlow<ConnectionState> =
         transport?.state ?: MutableStateFlow(ConnectionState.OFFLINE)
 
@@ -169,10 +190,16 @@ public class Recached private constructor(
      *
      * Not remembered across [open]s; call it again at startup.
      */
-    public fun watch(pattern: String): Unit = client.watch(pattern)
+    public fun watch(pattern: String) {
+        client.watch(pattern)
+        refreshSync()
+    }
 
     /** Stop syncing [pattern]. Local copies of its keys stay readable. */
-    public fun unwatch(pattern: String): Unit = client.unwatch(pattern)
+    public fun unwatch(pattern: String) {
+        client.unwatch(pattern)
+        refreshSync()
+    }
 
     /** Replace the sync token, e.g. after refreshing it. Sent now and on every reconnect. */
     public fun setSyncToken(token: String): Unit = client.setSyncToken(token)
@@ -240,6 +267,34 @@ public class Recached private constructor(
         client.close()
     }
 
+    /**
+     * Read the status and the patterns' progress and publish them, as one
+     * step under [syncLock]: a slower caller cannot publish an older status.
+     */
+    private fun refreshSync() {
+        synchronized(syncLock) {
+            // Patterns first: a collector that sees READY must find the
+            // patterns it waited for already current.
+            val changes = client.takeSubscriptionChanges()
+            if (changes.isNotEmpty()) {
+                val next = mutableSubscriptions.value.toMutableMap()
+                for (change in changes) {
+                    val state = change.state
+                    if (state == null) next.remove(change.pattern) else next[change.pattern] = state.toPublic()
+                }
+                mutableSubscriptions.value = next
+            }
+            client.takeStatusChange()
+            val status = client.syncStatus()
+            if (status.phase == dev.recached.ffi.SyncPhase.READY &&
+                mutableSyncStatus.value.phase != SyncPhase.READY
+            ) {
+                lastSyncedAtMillis = System.currentTimeMillis()
+            }
+            mutableSyncStatus.value = status.toPublic(lastSyncedAtMillis)
+        }
+    }
+
     /** Read and publish as one step, so a slower caller cannot publish an older count. */
     private fun refreshPending() {
         synchronized(pendingLock) {
@@ -270,6 +325,7 @@ public class Recached private constructor(
                         password = config.password,
                         syncToken = config.syncToken,
                         maxPendingWrites = config.maxPendingWrites?.toUInt(),
+                        evictOldestWhenFull = config.evictOldestWhenFull,
                     ),
                 )
             }
