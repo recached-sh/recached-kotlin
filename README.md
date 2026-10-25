@@ -16,7 +16,7 @@ Android, in Kotlin.
 Built on `recached-mobile`, the Rust core it shares with the Swift SDK, through
 [UniFFI](https://mozilla.github.io/uniffi-rs/).
 
-> **Status: 0.1.0, preview.** Built on the native core of recached v0.4.0. The API may still change before 1.0.
+> **Status: 0.1.1, preview.** Built on the native core of recached v0.5.0. The API may still change before 1.0.
 
 ## Install
 
@@ -24,7 +24,7 @@ From Maven Central:
 
 ```kotlin
 dependencies {
-    implementation("dev.recached:recached-android:0.1.0")
+    implementation("dev.recached:recached-android:0.1.1")
 }
 ```
 

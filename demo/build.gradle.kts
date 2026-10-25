@@ -14,8 +14,8 @@ android {
         applicationId = "dev.recached.demo"
         minSdk = 24
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.1.1"
         // The server the app connects to unless launched with `--es server <url>`:
         // the emulator's alias for the host machine. On a phone, use
         // `adb reverse tcp:6380 tcp:6380` and launch with ws://127.0.0.1:6380.
